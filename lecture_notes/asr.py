@@ -12,7 +12,9 @@ import os
 import platform
 import re
 import subprocess
+import difflib
 import tempfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -150,13 +152,80 @@ def _faster_whisper(wav_path, opts: AsrOptions, device: str, progress: ProgressF
                 if text:
                     out.append(Segment(round(s.start, 2), round(s.end, 2), text))
                 progress(min(s.end / duration, 1.0), f"Transcribed {_hms(s.end)} / {_hms(duration)}")
-            return out
+            return repair_loops(model, audio, out, opts, progress)
         except RuntimeError as e:
             if "out of memory" in str(e).lower() and batch > 1:
                 batch //= 2
                 progress(0.0, f"GPU out of memory - retrying with batch size {batch}")
                 continue
             raise
+
+
+_REPEAT_RE = re.compile(r"(.{2,40}?)(?:[\s,]*\1){3,}")
+
+
+def collapse_repeats(text: str) -> str:
+    """'แคลเซียมแคลเซียมแคลเซียมแคลเซียม' -> 'แคลเซียม' (4+ back-to-back repeats)."""
+    return _REPEAT_RE.sub(r"\1", text).strip()
+
+
+# Thai is 3 bytes/char in UTF-8 and compresses well, so normal Thai speech already reaches a
+# ratio of 2.4-2.7 (Whisper's English-tuned default threshold). Real loops measured 3.0-13.
+LOOP_RATIO = 2.9
+
+
+def _ratio(text: str) -> float:
+    raw = text.encode("utf-8")
+    return len(raw) / max(1, len(zlib.compress(raw)))
+
+
+def is_loop(text: str) -> bool:
+    """Whisper repetition loop: text that compresses far better than normal speech."""
+    return len(text.encode("utf-8")) > 60 and _ratio(text) > LOOP_RATIO
+
+
+def is_prompt_echo(text: str, prompt: str) -> bool:
+    """Whisper sometimes 'transcribes' its own hint prompt over music or silence."""
+    if not prompt or len(text) < 20:
+        return False
+    m = difflib.SequenceMatcher(None, text, prompt, autojunk=False)
+    return m.find_longest_match(0, len(text), 0, len(prompt)).size >= min(25, len(prompt) // 2)
+
+
+def repair_loops(model, audio, segments: list[Segment], opts: AsrOptions,
+                 progress: ProgressFn) -> list[Segment]:
+    """Re-decode looping or prompt-echo segments one by one with temperature fallback
+    (batched mode has none). Prompt echoes are re-decoded without the prompt."""
+    echo = {i for i, s in enumerate(segments) if is_prompt_echo(s.text, opts.prompt)}
+    bad = echo | {i for i, s in enumerate(segments) if is_loop(s.text)}
+    out: list[Segment] = []
+    done = 0
+    for i, s in enumerate(segments):
+        if i not in bad:
+            text = collapse_repeats(s.text)
+            out.append(Segment(s.start, s.end, text) if text != s.text else s)
+            continue
+        a = max(0, int((s.start - 0.3) * SAMPLE_RATE))
+        b = min(len(audio), int((s.end + 0.3) * SAMPLE_RATE))
+        it, _ = model.transcribe(
+            audio[a:b], language=None if opts.language == "auto" else opts.language,
+            beam_size=opts.beam_size, initial_prompt=None if i in echo else (opts.prompt or None),
+            condition_on_previous_text=False, vad_filter=False,
+            # Low temperatures only: hotter sampling turns Thai into mixed-language garbage.
+            # Fall back only on loops, not on low confidence (common in Thai), for repeatable output.
+            temperature=[0.0, 0.2, 0.4], compression_ratio_threshold=LOOP_RATIO,
+            log_prob_threshold=None,
+        )
+        offset = a / SAMPLE_RATE
+        sub = [Segment(round(offset + x.start, 2), round(offset + x.end, 2), collapse_repeats(x.text))
+               for x in it if x.text.strip()]
+        sub = [x for x in sub if x.text and not is_prompt_echo(x.text, opts.prompt)]
+        if not sub and i not in echo:
+            sub = [Segment(s.start, s.end, collapse_repeats(s.text))]
+        out.extend(sub)
+        done += 1
+        progress(1.0, f"Re-decoded {done}/{len(bad)} looping or prompt-echo segments")
+    return out
 
 
 # --------------------------------------------------------------------------- whisper.cpp
@@ -216,8 +285,8 @@ def _whisper_cpp(wav_path, opts: AsrOptions, kind: str, progress: ProgressFn) ->
 
     out = []
     for item in data.get("transcription", []):
-        text = item.get("text", "").strip()
-        if text:
+        text = collapse_repeats(item.get("text", ""))
+        if text and not is_prompt_echo(text, prompt):
             off = item["offsets"]
             out.append(Segment(off["from"] / 1000, off["to"] / 1000, text))
     return out

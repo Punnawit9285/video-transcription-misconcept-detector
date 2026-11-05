@@ -82,7 +82,8 @@ video ──PyAV──► 16 kHz WAV ──► faster-whisper (CUDA/CPU) ─┐
 ```
 
 - `lecture_notes/audio.py`: streams the audio track out of any video (no ffmpeg install needed)
-- `lecture_notes/asr.py`: the backends; `models.py`: model presets
+- `lecture_notes/asr.py`: the backends; `models.py`: model presets.
+  After batched decoding, a repair pass re-decodes any segment that is a Whisper repetition loop (e.g. "แคลเซียมแคลเซียมแคลเซียม…") or an echo of the hint prompt over silence. The thresholds are tuned for Thai, which compresses better than English.
 - `lecture_notes/analyze.py`: prompt and JSON schema for topics and issues; server-side refusal fallback is enabled
 - `lecture_notes/report.py`: Thai Markdown report
 - `lecture_notes/app.py`: Gradio UI; `cli.py`: command line

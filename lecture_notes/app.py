@@ -103,7 +103,13 @@ def build() -> gr.Blocks:
 
 
 def main() -> None:
-    build().queue().launch(inbrowser=True)
+    import argparse
+
+    p = argparse.ArgumentParser(description="Lecture Notes web UI")
+    p.add_argument("--port", type=int, default=7860)
+    p.add_argument("--no-browser", action="store_true", help="don't open a browser tab")
+    a = p.parse_args()
+    build().queue().launch(server_port=a.port, inbrowser=not a.no_browser)
 
 
 if __name__ == "__main__":
