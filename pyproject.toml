@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lecture-notes"
+version = "0.1.0"
+description = "Transcribe lecture videos (Thai + English terms) and get a timestamped topic map plus a list of wrong or unclear statements, written in Thai."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic>=2.0",
+    "av>=12",
+    "faster-whisper>=1.1",
+    "gradio>=5.0",
+    "huggingface_hub>=0.24",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+# NVIDIA GPUs (e.g. RTX 3070 Ti): CTranslate2 bundles cuDNN on Windows but needs cuBLAS.
+nvidia = ["nvidia-cublas-cu12"]
+
+[project.scripts]
+lecture-notes = "lecture_notes.cli:main"
+lecture-notes-app = "lecture_notes.app:main"
+
+[tool.setuptools.packages.find]
+include = ["lecture_notes*"]
